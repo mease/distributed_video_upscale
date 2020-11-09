@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+      - name: worker
+        image: dmease/upscale-worker:1.0
+        volumeMounts:
+        - mountPath: /etc/credentials
+          name: gcp-credentials
+        env:
+          - name: MONGO_HOST
+            value: mongo
+          - name: RABBITMQ_HOST
+            value: rabbitmq
+          - name: STORAGE_BUCKET
+            value: video_upscale_bucket
+          - name: GOOGLE_APPLICATION_CREDENTIALS
+            value: /etc/credentials/gcp-credentials.json
+      volumes:
+      - name: gcp-credentials
+        secret:
+          secretName: gcp-credentials
+          items:
+          - key: creds
+            path: gcp-credentials.json
