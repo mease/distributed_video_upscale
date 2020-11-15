@@ -234,7 +234,7 @@ def combine_chunks(id, channel):
     with open(split_name_file, 'w') as f:
         for name in split_names:
             f.write('file \'{}\'\n'.format(name))
-    combo = 'ffmpeg -f concat -safe 0 -i {} -c copy {}'
+    combo = 'ffmpeg -f concat -safe 0 -i {} {}'
     combo = combo.format(split_name_file, upscale_noaudio_filename)
     os.system(combo)
 
