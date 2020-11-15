@@ -120,15 +120,11 @@ def video_upscale():
                     mimetype="application/json")
 
 
-@app.route('/video/query', methods=['GET'])
-def video_query():
+@app.route('/video/query/<string:id>', methods=['GET'])
+def video_query(id):
     # MQ connection
     connection = pika.BlockingConnection(pika.ConnectionParameters(rabbitMQHost))
     channel = connection.channel()
-    
-    # Get file id
-    data = jsonpickle.decode(request.data)
-    id = data['id']
     log(channel, 'debug', 'Status query for ID: {}'.format(id))
 
     # Get status from database

@@ -29,19 +29,17 @@ def do_upscale(addr, filename, bucket_name):
     print('Sending request...')
     headers = {'content-type': 'application/json'}
     upscale_url = addr + '/video/upscale'
-    data = jsonpickle.encode({ 'id' : id})
+    data = jsonpickle.encode({'id': id})
     response = requests.post(upscale_url, data=data, headers=headers)
 
     # Decode response
     print('Response is', response)
     print(json.loads(response.text))
 
-def do_query(addr, filename):
+def do_query(addr, id):
     # Send query request
-    headers = {'content-type': 'application/json'}
-    upscale_url = addr + '/video/query'
-    data = jsonpickle.encode({ 'id' : id})
-    response = requests.get(upscale_url, data=data, headers=headers, timeout=600)
+    upscale_url = addr + '/video/query/' + id
+    response = requests.get(upscale_url, timeout=600)
 
     # Decode response
     print('Response is', response)

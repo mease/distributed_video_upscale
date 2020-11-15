@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: rest
-        image: dmease/upscale-server:1.0
+        image: dmease/upscale-server:2.0
         volumeMounts:
         - mountPath: /etc/credentials
           name: gcp-credentials
