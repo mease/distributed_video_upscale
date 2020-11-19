@@ -10,6 +10,7 @@ import hashlib
 import requests
 import traceback
 import time
+import threading
 
 
 hostname = platform.node()
@@ -30,20 +31,20 @@ app = Flask(__name__)
 
 
 # Log to RabbitMQ
-def log(channel, level, message):
+def log(level, message):
+    connection = pika.BlockingConnection(pika.ConnectionParameters(rabbitMQHost))
+    channel = connection.channel()
+
     routing_key = '{}.rest.{}'.format(hostname, level)
     print('{} {}'.format(routing_key, message))
     channel.basic_publish(exchange='logs',
                           routing_key=routing_key,
                           body=message)
+    connection.close()
 
 
 @app.route('/video/upscale/', methods=['POST'])
 def video_upscale():
-    # MQ connection
-    connection = pika.BlockingConnection(pika.ConnectionParameters(rabbitMQHost))
-    channel = connection.channel()
-    
     # Get filename from request
     data = jsonpickle.decode(request.data)
     id = data['id']
@@ -55,7 +56,7 @@ def video_upscale():
     os.makedirs(split_path, exist_ok=True)
 
     # Download the file
-    log(channel, 'debug', 'Downloading {}'.format(filename))
+    log('debug', 'Downloading {}'.format(filename))
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(filename)
@@ -63,7 +64,7 @@ def video_upscale():
     blob.download_to_filename(work_file, timeout=BLOB_TIMEOUT)
 
     # Split the file
-    log(channel, 'debug', 'Splitting {}'.format(filename))
+    log('debug', 'Splitting {}'.format(filename))
     split_cmd = 'ffmpeg -i {} -acodec copy -f segment -segment_time {} -vcodec copy -reset_timestamps 1 -map 0 -an {}/{}_%08d.mp4'
     split_cmd = split_cmd.format(work_file, chunk_size, split_path, id)
     os.system(split_cmd)
@@ -71,7 +72,7 @@ def video_upscale():
 
     # Upload splits
     for split_filename in splits:
-        log(channel, 'debug', 'Uploading split: {}'.format(split_filename))
+        log('debug', 'Uploading split: {}'.format(split_filename))
         blob = bucket.blob(split_filename)
         blob.upload_from_filename('{}/{}'.format(split_path, split_filename), timeout=BLOB_TIMEOUT)
 
@@ -96,19 +97,22 @@ def video_upscale():
             'upscale_name': 'NONE'}
 
     doc_id = db_data.insert_one(data).inserted_id
-    log(channel, 'debug', 'Updated DB for {}. Doc ID: {}'.format(filename, doc_id))
+    log('debug', 'Updated DB for {}. Doc ID: {}'.format(filename, doc_id))
 
     # Notify workers
+    connection = pika.BlockingConnection(pika.ConnectionParameters(rabbitMQHost))
+    channel = connection.channel()
     for split_filename in splits:
         to_worker = {'id': id,
                      'split_filename': split_filename}
-        log(channel, 'debug', 'Submitting to worker: {}'.format(split_filename))
+        log('debug', 'Submitting to worker: {}'.format(split_filename))
         channel.basic_publish(exchange='',
                       routing_key='toWorker',
                       body=jsonpickle.encode(to_worker))
-
-    # Close MQ connection
     connection.close()
+
+    # Start polling thread
+    threading.Thread(target=poll, args=(id,)).start()
 
     # Return response
     data = db_data.find_one({'id': id})
@@ -122,72 +126,24 @@ def video_upscale():
 
 @app.route('/video/query/<string:id>', methods=['GET'])
 def video_query(id):
-    # MQ connection
-    connection = pika.BlockingConnection(pika.ConnectionParameters(rabbitMQHost))
-    channel = connection.channel()
-    log(channel, 'debug', 'Status query for ID: {}'.format(id))
+    log('debug', 'Status query for ID: {}'.format(id))
 
     # Get status from database
     data = db_data.find_one({'id': id})
     if data == None:
-        log(channel, 'debug', 'No status found for ID: {}'.format(id))
+        log('debug', 'No status found for ID: {}'.format(id))
         response = {'id': id,
                     'status': 'NONE',
                     'upscale_name': 'NONE'}
-    
-        # Close MQ connection
-        connection.close()
 
         # Return response
         return Response(response=jsonpickle.encode(response),
                     status=200,
                     mimetype="application/json")
 
-    # Check if status needs updating
-    if data['status'] == 'IN_PROGRESS':
-        completed = True
-        for split in data['splits']:
-            if split['status'] != 'COMPLETE':
-                completed = False
-                break
-        if completed:
-            # Combine upscaled chunks
-            upscale_filename = combine_chunks(id, channel)
-
-            # Get latest worker completion time
-            latest_worker_end_time = -1
-            for split in data['splits']:
-                if split['time_end'] > latest_worker_end_time:
-                    latest_worker_end_time = split['time_end']
-
-            # Update DB status
-            log(channel, 'debug', 'Updating DB for ID: {}'.format(id))
-            db_data.update_one({'id': id},
-                               {'$set': {'status': 'COMPLETE',
-                                         'time_end': latest_worker_end_time,
-                                         'upscale_name': upscale_filename}})
-
-            # Clean up split file in storage
-            log(channel, 'debug', 'Cleaning up storage bucket for ID: {}'.format(id))
-            storage_client = storage.Client()
-            bucket = storage_client.bucket(bucket_name)
-            blob = bucket.blob('{}.mp4'.format(id))
-            blob.delete()
-            for split in data['splits']:
-                blob = bucket.blob(split['name'])
-                blob.delete()
-                blob = bucket.blob(split['upscale_name'])
-                blob.delete()
-
-            # Reload from DB
-            data = db_data.find_one({'id': id})
-
     response = {'id': id,
                 'status': data['status'],
                 'upscale_name': data['upscale_name']}
-    
-    # Close MQ connection
-    connection.close()
 
     # Return response
     return Response(response=jsonpickle.encode(response),
@@ -195,14 +151,61 @@ def video_query(id):
                     mimetype="application/json")
 
 
-def combine_chunks(id, channel):
+def poll(id):
+    log('debug', 'Polling status for ID {}'.format(id))
+    while(True):
+        time.sleep(10)
+        # Get status from database
+        data = db_data.find_one({'id': id})
+        if data == None:
+             return
+
+        # Check if status needs updating
+        if data['status'] == 'IN_PROGRESS':
+            completed = True
+            for split in data['splits']:
+                if split['status'] != 'COMPLETE':
+                    completed = False
+                    break
+            if completed:
+                # Combine upscaled chunks
+                upscale_filename = combine_chunks(id)
+
+                # Get latest worker completion time
+                latest_worker_end_time = -1
+                for split in data['splits']:
+                    if split['time_end'] > latest_worker_end_time:
+                        latest_worker_end_time = split['time_end']
+
+                # Update DB status
+                log('debug', 'Updating DB for ID: {}'.format(id))
+                db_data.update_one({'id': id},
+                                   {'$set': {'status': 'COMPLETE',
+                                             'time_end': latest_worker_end_time,
+                                             'upscale_name': upscale_filename}})
+
+                # Clean up split file in storage
+                log('debug', 'Cleaning up storage bucket for ID: {}'.format(id))
+                storage_client = storage.Client()
+                bucket = storage_client.bucket(bucket_name)
+                blob = bucket.blob('{}.mp4'.format(id))
+                blob.delete()
+                for split in data['splits']:
+                    blob = bucket.blob(split['name'])
+                    blob.delete()
+                    blob = bucket.blob(split['upscale_name'])
+                    blob.delete()
+                return
+
+
+def combine_chunks(id):
     # Create working directories
     combine_path = 'upscale/{}/combine'.format(id)
     os.makedirs(combine_path, exist_ok=True)
 
     # Download original file
     filename = '{}.mp4'.format(id)
-    log(channel, 'debug', 'Downloading {}'.format(filename))
+    log('debug', 'Downloading {}'.format(filename))
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(filename)
@@ -210,7 +213,7 @@ def combine_chunks(id, channel):
     blob.download_to_filename(work_file, timeout=BLOB_TIMEOUT)
 
     # Extract audio
-    log(channel, 'debug', 'Extracting audio from {}'.format(filename))
+    log('debug', 'Extracting audio from {}'.format(filename))
     audio_file = '{}/{}.aac'.format(combine_path, id)
     audio_ex = 'ffmpeg -i {} -vn -acodec copy {}'.format(work_file, audio_file)
     os.system(audio_ex)
@@ -221,7 +224,7 @@ def combine_chunks(id, channel):
     for split in data['splits']:
         split_filename = split['upscale_name']
         split_names.append(split_filename)
-        log(channel, 'debug', 'Downloading upscaled chunk {}'.format(split_filename))
+        log('debug', 'Downloading upscaled chunk {}'.format(split_filename))
         blob = bucket.blob(split_filename)
         split_path = '{}/{}'.format(combine_path, split_filename)
         blob.download_to_filename(split_path, timeout=BLOB_TIMEOUT)
@@ -229,7 +232,7 @@ def combine_chunks(id, channel):
 
     # Combine chunks
     upscale_noaudio_filename = '{}/{}_upscaled_noaudio.mp4'.format(combine_path, id)
-    log(channel, 'debug', 'Combining chunks for {}'.format(upscale_noaudio_filename))
+    log('debug', 'Combining chunks for {}'.format(upscale_noaudio_filename))
     split_name_file = '{}/splits.txt'.format(combine_path)
     with open(split_name_file, 'w') as f:
         for name in split_names:
@@ -241,13 +244,13 @@ def combine_chunks(id, channel):
     # Apply audio
     upscale_filename = '{}_upscaled.mp4'.format(id)
     upscale_filepath = '{}/{}_upscaled.mp4'.format(combine_path, id)
-    log(channel, 'debug', 'Applying audio to {}'.format(upscale_filename))
+    log('debug', 'Applying audio to {}'.format(upscale_filename))
     audio_ap = 'ffmpeg -i {} -i {} -c copy -map 0:v:0 -map 1:a:0 {}'
     audio_ap = audio_ap.format(upscale_noaudio_filename, audio_file, upscale_filepath)
     os.system(audio_ap)
 
     # Upload to storage
-    log(channel, 'debug', 'Uploading upscaled video: {}'.format(upscale_filename))
+    log('debug', 'Uploading upscaled video: {}'.format(upscale_filename))
     blob = bucket.blob(upscale_filename)
     blob.upload_from_filename(upscale_filepath, timeout=BLOB_TIMEOUT)
 

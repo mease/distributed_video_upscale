@@ -52,7 +52,7 @@ def callback(ch, method, properties, body):
     blob.download_to_filename(work_file)
 
     # Upscale the chunk
-    output_file = '{}_upscaled.mp4'.format(split_filename.split('.')[0])
+    output_file = '{}_upscaled.avi'.format(split_filename.split('.')[0])
     output_file_path = '{}/{}'.format(work_path, output_file)
     scale_factor = 4
     model = dnn_superres.DnnSuperResImpl_create()
@@ -92,7 +92,7 @@ def process_video(file_name, output_file_name, model, scale_factor, demo=False):
     fps = cap.get(cv2.CAP_PROP_FPS)
 
     # Define the codec and create VideoWriter object
-    fourcc = cv2.VideoWriter_fourcc('m', 'p', '4', 'v')
+    fourcc = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
     out = cv2.VideoWriter()
     if demo:
         out.open(output_file_name, fourcc, fps, (width*scale_factor*2, height*scale_factor), True)

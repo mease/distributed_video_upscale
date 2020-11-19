@@ -45,6 +45,24 @@ def do_query(addr, id):
     print('Response is', response)
     print(json.loads(response.text))
 
+def do_download(addr, id, bucket_name):
+    # Send query request
+    upscale_url = addr + '/video/query/' + id
+    response = requests.get(upscale_url, timeout=600)
+    response = json.loads(response.text)
+
+    if response['status'] == 'COMPLETE':
+        # Download file from storage bucket
+        bucket_filename = response['upscale_name']
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(bucket_filename)
+        print('Downloading {}'.format(bucket_filename))
+        blob.download_to_filename(bucket_filename)
+        print('Download complete.')
+    else:
+        print('File is not ready. Status is: {}'.format(response['status']))
+
 host = sys.argv[1]
 cmd = sys.argv[2]
 
@@ -57,5 +75,9 @@ if cmd == 'upscale':
 elif cmd == 'query':
     id = sys.argv[3]
     do_query(addr, id)
+elif cmd == 'download':
+    id = sys.argv[3]
+    bucket_name = sys.argv[4]
+    do_download(addr, id, bucket_name)
 else:
     print("Unknown option", cmd)
