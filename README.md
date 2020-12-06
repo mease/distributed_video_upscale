@@ -1,2 +1,2 @@
-# distributed_video_upscale
-Distributed Video Upscaling - CSCI 4253-5253
+# Distributed Video Upscaling with Neural Networks
+A distributed cloud-based system for upscaling video files utilizing Kubernetes and pre-trained OpenCV deep neural networks (DNN).
